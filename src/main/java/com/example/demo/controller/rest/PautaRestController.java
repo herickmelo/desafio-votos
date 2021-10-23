@@ -1,7 +1,5 @@
 package com.example.demo.controller.rest;
 
-import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -11,6 +9,8 @@ import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -18,6 +18,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.ResponseBody;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.client.RestTemplate;
 
 import com.example.demo.entity.Associado;
 import com.example.demo.entity.Pauta;
@@ -31,7 +32,7 @@ import com.example.demo.util.Reminder;
  *
  */
 @RestController
-@RequestMapping("/pauta")
+@RequestMapping("/v1/pauta")
 public class PautaRestController {
 	
 	@Autowired
@@ -48,23 +49,53 @@ public class PautaRestController {
 	@RequestMapping(method = RequestMethod.POST, headers = "Content-Type=application/json")
 	public String cadastrarPauta(@RequestBody Pauta pauta) {
 		pautaService.salvar(pauta);
-		/*for (Associado associado: pauta.getListaDeAssociados()) {
-			associado.setPauta(pauta);
-		}
-		associadosService.salvarTodos(pauta.getListaDeAssociados());*/
-		return "Pauta cadastrada";
+		return "Pauta " + pauta.getId() + " cadastrada.";
 	}
 	
 	/**
-	 * Recebe os votos dos associados
+	 * Verifica se o eleitor está apto a votar
+	 * @param pauta
+	 * @return
+	 */
+	public Boolean verificarEleitor(Associado associado) {
+        RestTemplate restTemplate = new RestTemplate();
+        String fooResourceUrl = "https://user-info.herokuapp.com/users/" + associado.getCpf();
+        try {
+            ResponseEntity<String> response = restTemplate.getForEntity(fooResourceUrl, String.class);
+			if (response.getBody().contains("UNABLE_TO_VOTE")) {
+				return false;
+			}else {
+				return true;
+			}
+		} catch (Exception e) {
+			return false;
+		}
+	}
+	
+	/**
+	 * Recebe os votos dos associados, remove os votos repetidos e verifica se a sessão de votação na pauta especificada está aberta
 	 * @param pauta
 	 * @return
 	 */
 	@RequestMapping(path = "/votos", method = RequestMethod.POST, headers = "Content-Type=application/json")
 	public String receberVotos(@RequestBody List<Associado> listaDeAssociados) {
+		String resultado = "";
 		List<Associado> associadosSemRepeticao = listaDeAssociados.stream().filter(distinctByKey(Associado::getCpfAndPauta)).collect(Collectors.toList());
-		associadosService.salvarTodos(associadosSemRepeticao);
-		return "Votos contabilizados";
+		for (Associado associado : associadosSemRepeticao) {
+			if (verificarSessao(associado.getPauta().getId())) {
+				if (verificarEleitor(associado)) {
+					associadosService.salvar(associado);	
+				}else {
+					resultado += "Eleitor "+associado.getCpf()+ " não pode votar.\nVoto não computado.\n";
+				}
+			}else {
+				resultado += "Sessão da pauta " +associado.getPauta().getId()+ " está fechada.\nVoto não computado.\n";
+			}
+		}
+		if (resultado == "") {
+			return "Todos os votos foram computados com sucesso.";
+		}
+		return resultado;
 	}
 	
 	public static <T> Predicate<T> distinctByKey(Function<? super T, ?> keyExtractor) {
@@ -77,20 +108,52 @@ public class PautaRestController {
 	 * @param pauta
 	 * @return
 	 */
-	@GetMapping(value = { "/abrirSessaoVotacao/{idPauta}", "/abrirSessaoVotacao/{idPauta}/{tempoAbertura}" })
+	@GetMapping(value = { "/abrirSessao/{idPauta}", "/abrirSessao/{idPauta}/{tempoAbertura}" })
 	@ResponseBody
-	public String abrirSessaoVotacao(@PathVariable Long idPauta, @PathVariable(required = false) Integer tempoAbertura) {
+	public String abrirSessao(@PathVariable Long idPauta, @PathVariable(required = false) Integer tempoAbertura) {
 		if(tempoAbertura == null) {
 			tempoAbertura = 60;
 		}
 		Optional<Pauta> p =  pautaService.findById(idPauta);
 		if (p.isPresent()) {
 			p.get().setSessaoAberta(true);
-			new Reminder(tempoAbertura);
+			new Reminder(tempoAbertura, p.get().getId());
+			pautaService.salvar(p.get());
 		}else {
 			return "Pauta não encontrada.";
 		}
 		return "Sessão aberta para votação.";
+	}
+	
+	/**
+	 * Fecha uma sessão de votação na pauta
+	 * @param pauta
+	 * @return
+	 */
+	@GetMapping(value = { "/fecharSessao/{idPauta}" })
+	@ResponseBody
+	public String fecharSessao(@PathVariable Long idPauta) {
+		Optional<Pauta> p =  pautaService.findById(idPauta);
+		if (p.isPresent()) {
+			p.get().setSessaoAberta(false);
+			pautaService.salvar(p.get());
+		}else {
+			return "Pauta não encontrada.";
+		}
+		return "Sessão fechada para votação.";
+	}
+	
+	/**
+	 * Verifica se uma sessão de votação está aberta ou fechada
+	 * @param pauta
+	 * @return
+	 */
+	public Boolean verificarSessao(@PathVariable Long idPauta) {
+		Optional<Pauta> p =  pautaService.findById(idPauta);
+		if (p.isPresent()) {
+			return p.get().getSessaoAberta();
+		}
+		return false;
 	}
 	
 	/**
